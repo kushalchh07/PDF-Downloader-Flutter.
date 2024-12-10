@@ -1,103 +1,106 @@
 import 'dart:developer';
+import 'dart:isolate';
 
-import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'package:permission_handler/permission_handler.dart';
+
 import 'package:path_provider/path_provider.dart';
 
-import 'pdf_list_screen.dart';
+import 'custom_download_dialog.dart';
 
-class PDFDownloader extends StatefulWidget {
-  @override
-  _PDFDownloaderState createState() => _PDFDownloaderState();
-}
+class DownloadManager {
+  bool isProgressing = false;
 
-class _PDFDownloaderState extends State<PDFDownloader> {
-  Dio dio = Dio();
-  bool isDownloading = false;
-  bool isProgressing = false; // Flag to track if the progress toast is showing
-
-  // Method to download the PDF file
-  Future<void> downloadPDF() async {
-    // Request permissions to access storage
-    // if (await Permission.storage.request().isGranted) {
-    // Show Toast that download has started
-    Fluttertoast.showToast(msg: "Download started...");
-
-    try {
-      // Getting the directory to store the PDF
-      final directory = await getApplicationDocumentsDirectory();
-      final filePath = '${directory.path}/my_downloaded_file.pdf';
-
-      // Start the download with progress
-      await dio.download(
-        'https://drive.google.com/uc?id=13NZyM0o2DEbeh3F8SoOdU7RMKREHBOy7&export=download', // The PDF file URL
-        filePath,
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
-            // Calculate the download progress
-            double progress = (received / total) * 100;
-            log("Progress: ${progress.toStringAsFixed(0)}%");
-
-            // If the progress has changed and is not 100%, show the Toast
-            if (progress < 100 && !isProgressing) {
-              setState(() {
-                isProgressing = true;
-              });
-              Fluttertoast.showToast(
-                msg: "Downloading: ${progress.toStringAsFixed(0)}%",
-                toastLength: Toast.LENGTH_SHORT,
-              );
-            }
-
-            // If the progress reaches 100%, show the completion message and stop progress Toast
-            if (progress == 100 && isProgressing) {
-              Fluttertoast.cancel(); // Cancel the ongoing toast
-              Fluttertoast.showToast(msg: "Download Complete!");
-              setState(() {
-                isProgressing = false;
-              });
-            }
-          }
-        },
-      );
-    } catch (e) {
-      // In case of error, show a toast with an error message
-      Fluttertoast.showToast(msg: "Error downloading PDF: $e");
-      log("Error downloading PDF: $e");
-    }
-    // } else {
-    //   // If the storage permission is not granted, show a Toast
-    //   Fluttertoast.showToast(msg: "Storage permission denied");
-    // }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text("PDF Downloader")),
-      body: Column(
-        children: [
-          Center(
-            child: ElevatedButton(
-              onPressed: () {
-                downloadPDF();
-              },
-              child: const Text('Download PDF'),
-            ),
-          ),
-          Center(
-            child: ElevatedButton(
-              onPressed: () {
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (context) => PDFListScreen()));
-              },
-              child: const Text('Downloaded PDFs'),
-            ),
-          )
-        ],
-      ),
+  /// Main download function
+  Future<void> downloadPDF(
+      BuildContext context, String url, String name) async {
+    final directory = await getApplicationDocumentsDirectory();
+    final filePath = '${directory.path}/$name.pdf';
+    final progressNotifier = ValueNotifier<double>(0.0);
+    // Show the progress dialog using StatefulDialog
+    log('Starting download with url :::::::::: $url');
+    Fluttertoast.showToast(msg: "Download Starting!");
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        if (context.findAncestorStateOfType<State>()?.mounted ?? false) {
+          return CustomDownloadDialog(
+            progressNotifier: progressNotifier,
+            title: name,
+            onCancel: () => Navigator.of(context).pop(),
+          );
+        } else {
+          return Container(); // or return some other widget
+        }
+      },
     );
+
+    // Create a ReceivePort to receive messages from the Isolate
+    final receivePort = ReceivePort();
+
+    // Spawn a new Isolate
+    await Isolate.spawn(
+      _downloadTask,
+      _DownloadParams(
+          url: url, filePath: filePath, sendPort: receivePort.sendPort),
+    );
+
+    // Listen for progress updates or completion from the Isolate
+    receivePort.listen((message) {
+      if (message is double) {
+        // Update progress in the notifier
+        progressNotifier.value = message;
+
+        if (message == 100) {
+          // Close the dialog and show completion Toast
+          Navigator.of(context).pop();
+          Fluttertoast.showToast(msg: "Download Complete!");
+          log('Download completed');
+        }
+      } else if (message is String) {
+        // Error message received from Isolate
+        Navigator.of(context).pop(); // Close the dialog
+        Fluttertoast.showToast(msg: message);
+        log('Error downloading: $message');
+      }
+    });
   }
 }
+
+/// Function to handle the download task in the Isolate
+Future<void> _downloadTask(_DownloadParams params) async {
+  Dio dio = Dio();
+  log('Download task started for URL: ${params.url}');
+  try {
+    await dio.download(
+      params.url,
+      params.filePath,
+      onReceiveProgress: (received, total) {
+        if (total != -1) {
+          double progress = (received / total) * 100;
+          log('Download progress: $progress%');
+          params.sendPort.send(progress);
+        }
+      },
+    );
+    log('Download completed successfully');
+    params.sendPort.send(100.0);
+  } catch (e) {
+    log('Error occurred during download: $e');
+    params.sendPort.send("Error downloading PDF: $e");
+  }
+}
+
+/// Class to hold parameters for the Isolate
+class _DownloadParams {
+  final String url;
+  final String filePath;
+  final SendPort sendPort;
+
+  _DownloadParams(
+      {required this.url, required this.filePath, required this.sendPort});
+}
+
+/// Progress Dialog Widget

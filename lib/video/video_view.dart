@@ -35,9 +35,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     if (!_controller.value.isInitialized) {
       return Scaffold(
         appBar: AppBar(
-          title: Text('Playing Video'),
+          title:const Text('Playing Video'),
         ),
-        body: Center(child: CircularProgressIndicator()),
+        body: const Center(child: CircularProgressIndicator()),
       );
     }
 
